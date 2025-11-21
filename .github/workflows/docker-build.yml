@@ -1,0 +1,68 @@
+name: Docker Build Test
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  docker-build-test:
+    name: Test Docker Build
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: langchain
+          POSTGRES_PASSWORD: langchain
+          POSTGRES_DB: langchain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: rag-pipeline:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test Docker container startup
+        run: |
+          docker run -d \
+            --name rag-test \
+            -e DATABASE_URL=postgresql://langchain:langchain@host.docker.internal:5432/langchain \
+            -e OPENAI_API_KEY=test-key \
+            -e SECRET_KEY=test-secret-key \
+            -e USER_AGENT=RAG-Pipeline-Test/1.0 \
+            --add-host=host.docker.internal:host-gateway \
+            rag-pipeline:test
+          
+          # Wait for container to start
+          sleep 10
+          
+          # Check if container is running
+          docker ps | grep rag-test
+          
+          # Check logs for errors
+          docker logs rag-test
+          
+          # Cleanup
+          docker stop rag-test
+          docker rm rag-test
+

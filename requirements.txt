@@ -1,0 +1,42 @@
+# FastAPI and server
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.20
+
+# Database
+sqlalchemy==2.0.44
+alembic==1.14.0
+asyncpg==0.30.0
+psycopg-binary==3.2.12
+
+# Authentication
+python-jose[cryptography]==3.3.0
+bcrypt==4.1.2  # Using bcrypt directly (not via passlib) to avoid compatibility issues
+# passlib[bcrypt]==1.7.4  # Not needed - using bcrypt directly instead
+
+# LangChain and LangGraph
+langchain==1.0.5
+langchain-core==1.0.5
+langchain-openai==1.0.2
+langchain-postgres==0.0.16
+langchain-community==0.4.1
+langchain-text-splitters==1.0.0
+langchain-classic==1.0.0
+langchain-pymupdf4llm==0.5.0
+langgraph==1.0.3
+langgraph-checkpoint-postgres==3.0.1
+langgraph-prebuilt==1.0.2
+
+# Configuration
+pydantic==2.12.4
+pydantic-settings==2.12.0
+python-dotenv==1.2.1
+
+# File handling
+aiofiles==25.1.0
+
+# Utilities
+python-docx==1.2.0
+requests==2.32.5  # For testing
+
+psycopg-pool==3.2.4

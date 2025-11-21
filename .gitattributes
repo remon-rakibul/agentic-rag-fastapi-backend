@@ -1,0 +1,25 @@
+# Git attributes for the RAG pipeline project
+
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python files
+*.py text diff=python
+
+# Markdown files
+*.md text diff=markdown
+
+# YAML files
+*.yml text
+*.yaml text
+
+# JSON files
+*.json text
+
+# Shell scripts
+*.sh text eol=lf
+
+# Docker files
+Dockerfile text
+docker-compose*.yml text
+.dockerignore text

@@ -1,0 +1,37 @@
+{
+  "system_messages": {
+    "generate_query_or_respond": {
+      "template": "IMPORTANT: You are answering the user's CURRENT question: '{current_question}'\n\nPrevious conversation history is provided below for context only. You MUST answer the CURRENT question above, not previous questions.\n\nIf you need information to answer '{current_question}', use the retrieval tool. If you can answer directly without retrieval, do so - but ONLY for the CURRENT question.",
+      "description": "System message for generate_query_or_respond node to ensure LLM focuses on current question in multi-turn conversations"
+    }
+  },
+  "prompts": {
+    "grade_documents": {
+      "template": "You are a grader assessing relevance of a retrieved document to a user question. \n Here is the retrieved document: \n\n {context} \n\nHere is the user question: {question} \nIf the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. \nGive a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question.",
+      "description": "Prompt for grading document relevance. Returns 'yes' if relevant, 'no' if not."
+    },
+    "rewrite_question": {
+      "template": "Look at the input and try to reason about the underlying semantic intent / meaning.\nHere is the initial question:\n ------- \n{question}\n ------- \nFormulate an improved question:",
+      "description": "Prompt for rewriting user questions to improve semantic search results"
+    },
+    "generate_answer": {
+      "template": "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question.\n\nIMPORTANT:\n- Answer naturally and directly, as if you know the information yourself\n- Do NOT mention \"as mentioned in the context\", \"according to the context\", \"the context states\", or similar phrases\n- Do NOT reference where the information came from - just provide the answer directly\n- If the context contains relevant information, extract and provide a clear, accurate answer\n- If the context is empty or does not contain relevant information, say: \"I don't have enough information to answer this question.\"\n- Be specific and factual\n- Use up to three sentences and keep the answer concise\n\nQuestion: {question}\n\nRetrieved Context:\n{context}\n\nAnswer:",
+      "description": "Prompt for generating final answer from retrieved context. Answers should be natural and direct without referencing the context source."
+    }
+  },
+  "retriever_tool": {
+    "name": "retrieve_documents",
+    "description": "Search and return information from ingested documents. Use this tool when you need to find specific information from the user's document collection. When calling this tool, use a clear, specific search query that matches the key terms from the user's question. For example, if the user asks 'who are the owners of recom', use a query like 'owners of recom' or 'recom owners' or 'recom company owners'.",
+    "description_template": "Search and return information from ingested documents. Use this tool when you need to find specific information from the user's document collection. When calling this tool, use a clear, specific search query that matches the key terms from the user's question."
+  },
+  "settings": {
+    "default_model": "gpt-4o-mini",
+    "default_temperature": 0,
+    "default_k": 5,
+    "streaming_enabled": true
+  },
+  "notes": {
+    "modification_guide": "To modify prompts:\n1. Edit this JSON file\n2. Restart the server\n3. Changes will be applied immediately\n\nTemplate variables:\n- {current_question}: The latest user question\n- {question}: The user question being processed\n- {context}: Retrieved document context\n\nSystem messages are prepended to conversation history.\nPrompts are used directly in LLM calls."
+  }
+}
+

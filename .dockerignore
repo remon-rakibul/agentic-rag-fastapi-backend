@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+test_*.py
+*_test.py
+
+# Documentation
+*.md
+!README.md
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Temporary files
+*.tmp
+*.bak
+/tmp/
+
+# Test files
+test_api.py
+test_api.sh
+test_server.sh
+tests/
+
+# Documentation files (keep only README.md)
+BUGS_*.md
+ISSUES_*.md
+MIGRATION_*.md
+TEST_*.md
+TESTING*.md
+VERIFICATION*.md
+FINAL_*.md
+QUICKSTART.md
+
