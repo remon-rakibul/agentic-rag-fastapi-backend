@@ -14,6 +14,7 @@ Production-ready FastAPI backend for LangGraph RAG pipeline with authentication,
 - 🧠 Memory management (delete thread memory, user-scoped cleanup)
 - 📊 Retrieval logging for debugging and improvement
 - ⚙️ Configurable prompts via JSON file
+- 🔧 Extensible tool calling (retriever + custom tools via registry)
 
 ## Architecture
 
@@ -24,7 +25,8 @@ rag-agent-fastapi-backend/
 │   ├── core/             # Configuration, security, database
 │   ├── models/           # Pydantic schemas and SQLAlchemy models
 │   ├── services/         # Business logic layer
-│   ├── workflows/       # LangGraph workflow components
+│   ├── workflows/        # LangGraph workflow components
+│   │   └── tools/        # Tool registry and custom tools
 │   └── utils/            # Utility functions
 ├── alembic/              # Database migrations
 └── tests/                # Test suite
@@ -180,10 +182,17 @@ curl -X DELETE http://localhost:8000/api/v1/remove/by-record/2 \
 
 ### Chat
 ```bash
+# RAG query (uses ingested documents)
 curl -X POST http://localhost:8000/api/v1/chat \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message": "What is reward hacking?", "thread_id": null}'
+
+# Tool-style query (uses built-in tools, e.g. date/time or calculator)
+curl -X POST http://localhost:8000/api/v1/chat \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is today'\''s date and time?", "thread_id": null}'
 ```
 
 ### Memory Management
@@ -278,6 +287,38 @@ System prompts and RAG workflow prompts are configured in `app/workflows/prompts
 - Retriever tool configuration
 
 See [app/workflows/PROMPTS_GUIDE.md](app/workflows/PROMPTS_GUIDE.md) for details.
+
+### Tool Calling
+
+The RAG workflow supports multiple tools: the document retriever plus any custom tools you register. Tools live in `app/workflows/tools/`.
+
+**Built-in example tools** (in `app/workflows/tools/example_tools.py`):
+
+- **get_current_datetime** – Returns the current date and time (optional format string). Use for questions like “What is today’s date?” or “What time is it?”
+- **calculate** – Evaluates mathematical expressions (e.g. `2 + 2`, `sqrt(16)`). Use for questions like “Calculate 15 * 23.”
+
+**How to add a new tool:**
+
+1. Create a function with a clear docstring (the LLM uses it to decide when to call the tool) and typed parameters. Use `Annotated[str, "description"]` for parameter descriptions.
+2. Decorate it with `@tool_registry.register` in any module under `app/workflows/tools/`.
+3. Import that module in `app/workflows/tools/__init__.py` so it is loaded at startup.
+
+Example:
+
+```python
+# In app/workflows/tools/my_tools.py
+from typing import Annotated
+from app.workflows.tools import tool_registry
+
+@tool_registry.register
+def my_tool(query: Annotated[str, "What to search for"]) -> str:
+    """Short description for the LLM. Use when the user asks about X."""
+    return "result"
+```
+
+Then add `from app.workflows.tools import my_tools  # noqa: E402, F401` to `app/workflows/tools/__init__.py`.
+
+**Testing tool calling:** Send a chat message such as “What is today’s date and time?” or “Calculate 10 * 5” to confirm the agent uses the tools and returns correct results.
 
 ### Retrieval Logging
 
