@@ -80,77 +80,48 @@ class ChatService:
             # Use astream_events for TRUE token-by-token streaming
             # This works with AsyncPostgresSaver!
             full_content = ""
-            
-            # Buffer for direct responses from generate_query_or_respond
-            # We buffer because tokens stream BEFORE we know if retrieval will happen
-            direct_response_buffer = []
-            will_retrieve = False
-            
+            is_using_tools = False
+
             # Set context for retrieval logging
             logger = get_retrieval_logger()
             logger.set_context(thread_id=thread_id, original_question=message)
-            
+
             async for event in graph.astream_events(
                 {"messages": input_messages},
                 config=config,
-                version="v1"  # Use v1 as in the working example
+                version="v1"
             ):
                 metadata = event.get("metadata", {})
                 node_name = metadata.get("langgraph_node", "")
-                
-                # Detect if retrieval will happen (before tokens are streamed)
-                if event["event"] == "on_chain_start" and node_name == "retrieve":
-                    will_retrieve = True
-                    # Clear buffer since we're going retrieval path
-                    direct_response_buffer = []
-                
-                # Listen for LLM token streaming events
+
+                # Track when tools node is active (LLM decided to use a tool)
+                if event["event"] == "on_chain_start" and node_name == "tools":
+                    is_using_tools = True
+                if event["event"] == "on_chain_end" and node_name == "tools":
+                    is_using_tools = False
+
+                # Stream tokens from LLM
                 if event["event"] == "on_chat_model_stream":
-                    # Stream from generate_answer (after retrieval)
-                    if node_name == "generate_answer":
-                        content = event["data"]["chunk"].content
-                        if content:
+                    chunk = event["data"].get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        content = chunk.content
+                        # Stream from generate_query_or_respond (direct response) when not in tools
+                        if node_name == "generate_query_or_respond" and not is_using_tools:
                             full_content += content
                             yield {
                                 "type": "token",
                                 "content": content,
                                 "thread_id": thread_id
                             }
-                    
-                    # Buffer tokens from generate_query_or_respond
-                    # We'll stream them only if retrieval doesn't happen
-                    elif node_name == "generate_query_or_respond":
-                        chunk = event["data"].get("chunk")
-                        if chunk and hasattr(chunk, "content") and chunk.content:
-                            direct_response_buffer.append(chunk.content)
-                
-                # When generate_query_or_respond ends, check if we should stream buffered content
-                if event["event"] == "on_chain_end" and node_name == "generate_query_or_respond":
-                    # If we didn't go to retrieve and have buffered content, stream it
-                    if not will_retrieve and direct_response_buffer:
-                        buffered_content = "".join(direct_response_buffer)
-                        full_content += buffered_content
-                        yield {
-                            "type": "token",
-                            "content": buffered_content,
-                            "thread_id": thread_id
-                        }
-                        direct_response_buffer = []
-                    
-                    # Reset flag for next iteration (if generate_query_or_respond is called again)
-                    will_retrieve = False
-            
-            # Final check: Stream any remaining buffered direct response
-            # (in case workflow ended without going through generate_answer)
-            if direct_response_buffer and not will_retrieve:
-                buffered_content = "".join(direct_response_buffer)
-                full_content += buffered_content
-                yield {
-                    "type": "token",
-                    "content": buffered_content,
-                    "thread_id": thread_id
-                }
-            
+                        # Stream from generate_answer (after tool/retrieval)
+                        elif node_name == "generate_answer":
+                            full_content += content
+                            yield {
+                                "type": "token",
+                                "content": content,
+                                "thread_id": thread_id
+                            }
+
             # Yield completion
             yield {
                 "type": "done",

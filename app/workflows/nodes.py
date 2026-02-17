@@ -2,8 +2,9 @@
 from langgraph.graph import MessagesState
 from langchain.chat_models import init_chat_model
 from langchain_classic.tools.retriever import create_retriever_tool
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, List, Optional
 import os
 from app.core.config import settings
 from app.workflows.prompt_loader import (
@@ -29,27 +30,35 @@ class GradeDocuments(BaseModel):
     )
 
 
-def create_workflow_nodes(retriever_tool, model_name: str = None):
+def create_workflow_nodes(
+    retriever_tool: BaseTool,
+    all_tools: Optional[List[BaseTool]] = None,
+    model_name: str = None
+):
     """Create workflow node functions with shared models.
-    
+
     Args:
-        retriever_tool: The retriever tool instance
+        retriever_tool: The retriever tool instance (used for document grading)
+        all_tools: All available tools (retriever + custom tools). Defaults to [retriever_tool].
         model_name: Model name (defaults to value from prompts.json)
     """
+    if all_tools is None:
+        all_tools = [retriever_tool]
+
     # Use model from prompts.json if not specified
     if model_name is None:
         model_name = _settings.get('default_model', 'gpt-4o-mini')
-    
+
     temperature = _settings.get('default_temperature', 0)
     streaming_enabled = _settings.get('streaming_enabled', True)
-    
+
     # Initialize models with settings from prompts.json
     response_model = init_chat_model(
-        model_name, 
-        temperature=temperature, 
+        model_name,
+        temperature=temperature,
         streaming=streaming_enabled
     )
-    grader_model = init_chat_model(model_name, temperature=temperature)
+    grader_model = init_chat_model(model_name, temperature=temperature, streaming=False)
     
     def _get_latest_user_question(messages, exclude_last: bool = False):
         """Helper to find the most recent user message in the conversation.
@@ -178,10 +187,10 @@ def create_workflow_nodes(retriever_tool, model_name: str = None):
         
         response = (
             response_model
-            .bind_tools([retriever_tool]).invoke(messages_with_context)
+            .bind_tools(all_tools).invoke(messages_with_context)
         )
         return {"messages": [response]}
-    
+
     def grade_documents(
         state: MessagesState,
     ) -> Literal["generate_answer", "rewrite_question"]:
@@ -309,10 +318,42 @@ def create_workflow_nodes(retriever_tool, model_name: str = None):
         prompt = get_prompt("generate_answer", question=question, context=context)
         response = response_model.invoke([{"role": "user", "content": prompt}])
         return {"messages": [response]}
-    
+
+    def route_after_tools(
+        state: MessagesState,
+    ) -> Literal["generate_answer", "rewrite_question"]:
+        """Route after tool execution based on which tool was called.
+
+        If retriever tool was called: grade documents and route accordingly.
+        If other tools were called: go to generate_answer (tool result as context).
+        """
+        messages = state["messages"]
+
+        # Find the most recent tool response
+        last_tool_name = None
+        for msg in reversed(messages):
+            msg_type = getattr(msg, 'type', None) or (msg.get('type') if isinstance(msg, dict) else None)
+            msg_role = getattr(msg, 'role', None) or (msg.get('role') if isinstance(msg, dict) else None)
+
+            if (msg_type == "tool") or (msg_role == "tool"):
+                if hasattr(msg, 'name'):
+                    last_tool_name = msg.name
+                elif isinstance(msg, dict):
+                    last_tool_name = msg.get('name')
+                break
+
+        # If retriever tool was called, grade the documents
+        retriever_name = retriever_tool.name
+        if last_tool_name == retriever_name:
+            return grade_documents(state)
+
+        # For other tools, go to generate_answer to formulate a natural response
+        return "generate_answer"
+
     return {
         "generate_query_or_respond": generate_query_or_respond,
         "grade_documents": grade_documents,
+        "route_after_tools": route_after_tools,
         "rewrite_question": rewrite_question,
         "generate_answer": generate_answer,
     }

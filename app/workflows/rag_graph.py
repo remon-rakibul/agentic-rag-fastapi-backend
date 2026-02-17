@@ -6,6 +6,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 from app.workflows.nodes import create_workflow_nodes
 from app.workflows.prompt_loader import get_retriever_tool_config
+from app.workflows.tools import get_all_tools
 from app.core.config import settings
 from app.utils.db_uri import normalize_db_uri_for_asyncpg
 
@@ -35,38 +36,41 @@ def build_rag_graph(retriever, checkpointer, tool_name: str = None, tool_descrip
         tool_name,
         tool_description,
     )
-    
-    # Create workflow nodes
-    nodes = create_workflow_nodes(retriever_tool)
-    
+
+    # Get all tools (retriever + registered tools)
+    all_tools = get_all_tools(retriever_tool)
+
+    # Create workflow nodes with all tools
+    nodes = create_workflow_nodes(retriever_tool, all_tools=all_tools)
+
     # Build workflow graph
     workflow = StateGraph(MessagesState)
-    
+
     # Add nodes
     workflow.add_node("generate_query_or_respond", nodes["generate_query_or_respond"])
-    workflow.add_node("retrieve", ToolNode([retriever_tool]))
+    workflow.add_node("tools", ToolNode(all_tools))
     workflow.add_node("rewrite_question", nodes["rewrite_question"])
     workflow.add_node("generate_answer", nodes["generate_answer"])
-    
+
     # Add edges
     workflow.add_edge(START, "generate_query_or_respond")
-    
-    # Conditional edge: decide whether to retrieve
+
+    # Conditional edge: decide whether to use tools
     workflow.add_conditional_edges(
         "generate_query_or_respond",
         tools_condition,
         {
-            "tools": "retrieve",
+            "tools": "tools",
             END: END,
         },
     )
-    
-    # Conditional edge: grade documents
+
+    # After tools: route based on which tool was called (retriever -> grade_documents; else -> generate_answer)
     workflow.add_conditional_edges(
-        "retrieve",
-        nodes["grade_documents"],
+        "tools",
+        nodes["route_after_tools"],
     )
-    
+
     workflow.add_edge("generate_answer", END)
     workflow.add_edge("rewrite_question", "generate_query_or_respond")
     
