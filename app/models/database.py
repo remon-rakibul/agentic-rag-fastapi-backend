@@ -1,5 +1,5 @@
 """SQLAlchemy database models."""
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean, LargeBinary
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
@@ -18,6 +18,8 @@ class User(Base):
     # Relationships
     documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
     chat_threads = relationship("ChatThread", back_populates="user", cascade="all, delete-orphan")
+    image_assets = relationship("ImageAsset", back_populates="user", cascade="all, delete-orphan")
+    table_elements = relationship("TableElement", back_populates="user", cascade="all, delete-orphan")
 
 
 class Document(Base):
@@ -34,6 +36,8 @@ class Document(Base):
     
     # Relationships
     user = relationship("User", back_populates="documents")
+    image_assets = relationship("ImageAsset", back_populates="document", cascade="all, delete-orphan")
+    table_elements = relationship("TableElement", back_populates="document", cascade="all, delete-orphan")
 
 
 class ChatThread(Base):
@@ -74,4 +78,50 @@ class TokenBlacklist(Base):
     token = Column(String, unique=True, nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ImageAsset(Base):
+    """Raw image bytes extracted from PDFs or uploaded directly.
+
+    Linked from PGVector chunk metadata via ``image_asset_id``. The chunk in
+    PGVector holds the gpt-4o-mini caption (which is what gets embedded and
+    searched); this row holds the original bytes that are passed back to the
+    multimodal LLM at answer-generation time.
+    """
+    __tablename__ = "image_assets"
+
+    id = Column(String, primary_key=True)  # uuid; mirrored in PGVector metadata
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=True, index=True)
+    mime_type = Column(String, nullable=False)
+    image_bytes = Column(LargeBinary, nullable=False)
+    summary = Column(Text, nullable=False)
+    page_number = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    user = relationship("User", back_populates="image_assets")
+    document = relationship("Document", back_populates="image_assets")
+
+
+class TableElement(Base):
+    """Raw markdown of a table extracted from a PDF.
+
+    Linked from PGVector chunk metadata via ``table_id``. The chunk in PGVector
+    holds the table summary (embedded for retrieval); this row holds the raw
+    markdown table that is appended to the prompt at answer-generation time.
+    """
+    __tablename__ = "table_elements"
+
+    id = Column(String, primary_key=True)  # uuid; mirrored in PGVector metadata
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=True, index=True)
+    raw_markdown = Column(Text, nullable=False)
+    summary = Column(Text, nullable=False)
+    page_number = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    user = relationship("User", back_populates="table_elements")
+    document = relationship("Document", back_populates="table_elements")
 

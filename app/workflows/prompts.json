@@ -15,13 +15,21 @@
       "description": "Prompt for rewriting user questions to improve semantic search results"
     },
     "generate_answer": {
-      "template": "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question.\n\nIMPORTANT:\n- Answer naturally and directly, as if you know the information yourself\n- Do NOT mention \"as mentioned in the context\", \"according to the context\", \"the context states\", or similar phrases\n- Do NOT reference where the information came from - just provide the answer directly\n- If the context contains relevant information, extract and provide a clear, accurate answer\n- If the context is empty or does not contain relevant information, say: \"I don't have enough information to answer this question.\"\n- Be specific and factual\n- Use up to three sentences and keep the answer concise\n\nQuestion: {question}\n\nRetrieved Context:\n{context}\n\nAnswer:",
-      "description": "Prompt for generating final answer from retrieved context. Answers should be natural and direct without referencing the context source."
+      "template": "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question.\n\nIMPORTANT:\n- Some context items may be summaries of tables or images. When the original raw markdown table is provided inline (look for sections labelled 'Raw table:'), use it as the primary source of truth for that table. When images are attached to this message, inspect them directly when relevant to the question.\n- Answer naturally and directly, as if you know the information yourself\n- Do NOT mention \"as mentioned in the context\", \"according to the context\", \"the context states\", or similar phrases\n- Do NOT reference where the information came from - just provide the answer directly\n- If the context contains relevant information, extract and provide a clear, accurate answer\n- If the context is empty or does not contain relevant information, say: \"I don't have enough information to answer this question.\"\n- Be specific and factual\n- Use up to three sentences and keep the answer concise\n\nQuestion: {question}\n\nRetrieved Context:\n{context}\n\nAnswer:",
+      "description": "Prompt for generating final answer from retrieved context. Answers should be natural and direct without referencing the context source. Aware of multimodal attachments (raw tables and images)."
+    },
+    "image_summary": {
+      "template": "You are summarizing an image so it can be retrieved later by semantic search. Describe the image in detail, optimised for retrieval. Cover: subject and key entities, any visible text, numbers, labels, or captions, the structure of charts, diagrams, or tables, and the likely topic the image is about. Be specific and dense; aim for three to five sentences. Do not prefix with 'Summary:' or similar; output the description directly.",
+      "description": "Prompt sent to the multimodal LLM to caption an image. The caption is what gets embedded in PGVector; the original image is fetched at answer time."
+    },
+    "table_summary": {
+      "template": "You are summarizing a table so it can be retrieved later by semantic search. The table is provided below as markdown. Give a detailed summary of what the table contains, optimised for retrieval. Add a one-line description of what the table is about, then list the columns and key rows or trends. Do not prefix with 'Summary:' or similar; output the description directly.\n\nTable:\n{table}",
+      "description": "Prompt sent to an LLM to summarize a table. The summary is embedded in PGVector; the original markdown table is fetched at answer time."
     }
   },
   "retriever_tool": {
     "name": "retrieve_documents",
-    "description": "Search and return information from ingested documents. Use this tool when you need to find specific information from the user's document collection. When calling this tool, use a clear, specific search query that matches the key terms from the user's question. For example, if the user asks 'who are the owners of recom', use a query like 'owners of recom' or 'recom owners' or 'recom company owners'.",
+    "description": "Search and return information from ingested documents. Use this tool when you need to find specific information from the user's document collection. Results may include text passages, table summaries (with raw tables fetched at answer time), and image summaries (with original images attached at answer time). When calling this tool, use a clear, specific search query that matches the key terms from the user's question.",
     "description_template": "Search and return information from ingested documents. Use this tool when you need to find specific information from the user's document collection. When calling this tool, use a clear, specific search query that matches the key terms from the user's question."
   },
   "settings": {
@@ -31,7 +39,6 @@
     "streaming_enabled": true
   },
   "notes": {
-    "modification_guide": "To modify prompts:\n1. Edit this JSON file\n2. Restart the server\n3. Changes will be applied immediately\n\nTemplate variables:\n- {current_question}: The latest user question\n- {question}: The user question being processed\n- {context}: Retrieved document context\n\nSystem messages are prepended to conversation history.\nPrompts are used directly in LLM calls."
+    "modification_guide": "To modify prompts:\n1. Edit this JSON file\n2. Restart the server\n3. Changes will be applied immediately\n\nTemplate variables:\n- {current_question}: The latest user question\n- {question}: The user question being processed\n- {context}: Retrieved document context\n- {table}: Raw markdown of a table being summarized\n\nSystem messages are prepended to conversation history.\nPrompts are used directly in LLM calls."
   }
 }
-

@@ -9,8 +9,14 @@ from app.core.config import settings
 from app.models.database import User, Document
 from app.models.schemas import DigestRequest, DigestResponse
 from app.services.ingestion_service import get_ingestion_service
+from app.utils.loaders import get_file_type
 
 router = APIRouter(prefix="/digest", tags=["documents"])
+
+
+# Source type stored on the Document row when a file is uploaded directly. PDF
+# / DOCX / TXT keep their existing types; image uploads get ``image``.
+_FILE_SOURCE_TYPES = {"pdf", "docx", "txt", "image"}
 
 
 @router.post("/urls", response_model=DigestResponse, status_code=status.HTTP_201_CREATED)
@@ -107,25 +113,15 @@ async def ingest_documents(
 ):
     """
     Ingest documents from files and/or URLs.
-    
-    **⚠️ NOTE**: For URL-only ingestion, it's easier to use the `/digest/urls` endpoint instead!
-    
-    **Parameters:**
-    - **files**: Upload one or more files (PDF, DOCX, TXT)
-    - **urls**: JSON array of URLs (e.g., `["https://example.com"]`) - Leave empty or omit if not using
-    - **metadata**: JSON object with additional metadata (e.g., `{"category": "docs"}`) - Leave empty or omit if not using
-    
-    **Example using only files:**
-    - files: Upload your PDF/DOCX/TXT files
-    - urls: (leave empty)
-    - metadata: (leave empty)
-    
-    **Example using only URLs (IMPORTANT - Swagger UI quirk):**
-    - files: **Check the "Send empty value" checkbox** or the request will fail
-    - urls: `["https://example.com", "https://example.org"]`
-    - metadata: `{"source": "web"}` or leave empty
-    
-    **Tip:** For cleaner URL ingestion, use POST `/api/v1/digest/urls` with JSON body instead.
+
+    Supported file types:
+    - **PDF**: text + tables (extracted as markdown) + embedded images
+      (captioned by the multimodal LLM)
+    - **DOCX, TXT, MD**: text only
+    - **PNG, JPG, JPEG, WEBP**: direct image uploads, captioned by the
+      multimodal LLM and stored as a single image asset
+
+    **Note**: For URL-only ingestion, prefer the `/digest/urls` endpoint.
     """
     ingestion_service = get_ingestion_service()
     all_document_ids = []
@@ -188,36 +184,34 @@ async def ingest_documents(
         all_document_ids.extend(doc_ids)
         total_chunks += chunk_count
         
-        # Store document metadata (one record per URL)
-        # Note: All URLs share the same document_ids since they're processed together
-        # For more granular tracking, process URLs individually
-        doc = Document(
+        # Store document metadata (one record per URL group)
+        url_doc = Document(
             user_id=current_user.id,
             source_type="url",
             source_path=", ".join(url_list),  # Store all URLs
             chunk_count=chunk_count,
             document_ids=json.dumps(doc_ids)
         )
-        db.add(doc)
+        db.add(url_doc)
     
-    # Process files
+    # Process files (one Document row per uploaded file so image_assets /
+    # table_elements can be linked to a single owning Document for cascade
+    # deletes).
     if files:
         if len(files) == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Files list cannot be empty"
             )
-        
-        file_data = []
-        total_size = 0
+
         MAX_FILES = 20  # Limit number of files
-        
         if len(files) > MAX_FILES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Too many files. Maximum {MAX_FILES} files allowed per request"
             )
-        
+
+        total_size = 0
         for file in files:
             # Validate filename
             if not file.filename or not file.filename.strip():
@@ -225,49 +219,67 @@ async def ingest_documents(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Filename cannot be empty"
                 )
-            
+
             content = await file.read()
             file_size = len(content)
             total_size += file_size
-            
-            # Check file size limit
+
             if total_size > settings.MAX_UPLOAD_SIZE:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail=f"Total file size exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE} bytes"
                 )
-            
-            # Check individual file size
+
             if file_size > settings.MAX_UPLOAD_SIZE:
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail=f"File {file.filename} exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE} bytes"
                 )
-            
-            file_data.append((content, file.filename))
-        
-        doc_ids, chunk_count = await ingestion_service.ingest_files(
-            files=file_data,
-            user_id=current_user.id,
-            metadata=metadata_dict
-        )
-        all_document_ids.extend(doc_ids)
-        total_chunks += chunk_count
-        
-        # Store document metadata (one record per file)
-        for file_content, filename in file_data:
-            # Estimate chunks per file (rough approximation)
-            # In production, you might want to track this more accurately
-            estimated_chunks = chunk_count // len(file_data) if file_data else 0
-            doc = Document(
+
+            file_type = get_file_type(file.filename)
+            if file_type not in _FILE_SOURCE_TYPES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Unsupported file type for {file.filename}. "
+                        f"Supported: PDF, DOCX, TXT, MD, PNG, JPG, JPEG, WEBP."
+                    ),
+                )
+
+            # Create the Document row first so we have an id to link
+            # image_assets / table_elements to (cascade delete on document
+            # removal).
+            doc_row = Document(
                 user_id=current_user.id,
-                source_type="file",
-                source_path=filename,
-                chunk_count=estimated_chunks,
-                document_ids=json.dumps(doc_ids)  # All files share IDs (processed together)
+                source_type=file_type,
+                source_path=file.filename,
+                chunk_count=0,
+                document_ids=json.dumps([]),
             )
-            db.add(doc)
-    
+            db.add(doc_row)
+            db.flush()  # populate doc_row.id without committing
+
+            try:
+                doc_ids, chunk_count = await ingestion_service.ingest_files(
+                    files=[(content, file.filename)],
+                    user_id=current_user.id,
+                    metadata=metadata_dict,
+                    db=db,
+                    document_id=doc_row.id,
+                )
+            except Exception as e:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to ingest {file.filename}: {str(e)}",
+                )
+
+            doc_row.chunk_count = chunk_count
+            doc_row.document_ids = json.dumps(doc_ids)
+
+            all_document_ids.extend(doc_ids)
+            total_chunks += chunk_count
+
     try:
         db.commit()
     except Exception as e:
@@ -282,4 +294,3 @@ async def ingest_documents(
         chunk_count=total_chunks,
         status="success"
     )
-

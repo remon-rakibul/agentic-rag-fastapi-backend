@@ -11,7 +11,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.database import Base
-from app.models.database import User, Document, ChatThread, ChatMessage, TokenBlacklist
+from app.models.database import (
+    User,
+    Document,
+    ChatThread,
+    ChatMessage,
+    TokenBlacklist,
+    ImageAsset,
+    TableElement,
+)
 from app.core.config import settings
 
 # this is the Alembic Config object

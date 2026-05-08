@@ -1,11 +1,36 @@
-"""Document loader factory for various file types."""
-from typing import List
-from langchain_core.documents import Document
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_pymupdf4llm import PyMuPDF4LLMLoader
+"""Document loader factory for various file types.
+
+Supports text-based loaders (PDF text via PyMuPDF4LLM, DOCX, TXT, URLs) plus
+multimodal helpers used by the Option 3 multi-modal RAG pipeline:
+
+- ``extract_images_from_pdf``: pulls embedded images out of a PDF as raw bytes
+- ``extract_tables_from_pdf``: detects tables on each page and returns
+  markdown for each one (PyMuPDF >= 1.23)
+- ``load_image_file``: reads a directly-uploaded image file as raw bytes
+
+All multimodal helpers are pure (no I/O outside the file system / PyMuPDF)
+so they are easy to unit test.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import List, Tuple
+
 import aiofiles
 import os
-from pathlib import Path
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_core.documents import Document
+from langchain_pymupdf4llm import PyMuPDF4LLMLoader
+
+
+# Map common image extensions to their MIME types. Used by ``load_image_file``
+# and by ``get_file_type`` to detect direct image uploads.
+_IMAGE_EXT_TO_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 async def load_documents_from_urls(urls: List[str]) -> List[Document]:
@@ -77,6 +102,107 @@ async def load_documents_from_file(file_path: str, file_type: str) -> List[Docum
         raise ValueError(f"Failed to load file {file_path} (type: {file_type}): {str(e)}") from e
 
 
+def extract_images_from_pdf(file_path: str) -> List[Tuple[bytes, str, int]]:
+    """Extract embedded images from a PDF.
+
+    Uses PyMuPDF (``fitz``). For each page, ``page.get_images()`` lists every
+    image XRef referenced on the page; ``doc.extract_image(xref)`` returns the
+    raw bytes plus the original extension. We deduplicate by XRef so that a
+    logo that appears on every page is only captioned and stored once.
+
+    Returns a list of ``(image_bytes, mime_type, page_number)`` tuples. Pages
+    are 1-indexed for human-friendly references in the UI/logs.
+    """
+    import fitz  # type: ignore[import-untyped]  # PyMuPDF
+
+    results: List[Tuple[bytes, str, int]] = []
+    seen_xrefs: set[int] = set()
+
+    try:
+        with fitz.open(file_path) as doc:
+            for page_index, page in enumerate(doc):
+                # Each entry: (xref, smask, w, h, bpc, colorspace, alt, name, filter, ...)
+                for img_info in page.get_images(full=True):
+                    xref = img_info[0]
+                    if xref in seen_xrefs:
+                        continue
+                    seen_xrefs.add(xref)
+                    try:
+                        img = doc.extract_image(xref)
+                    except Exception:
+                        # Some entries are masks or unreadable; skip silently.
+                        continue
+                    image_bytes = img.get("image")
+                    ext = (img.get("ext") or "png").lower()
+                    if not image_bytes:
+                        continue
+                    mime = _IMAGE_EXT_TO_MIME.get(f".{ext}", f"image/{ext}")
+                    results.append((image_bytes, mime, page_index + 1))
+    except Exception as e:
+        raise ValueError(f"Failed to extract images from {file_path}: {e}") from e
+
+    return results
+
+
+def extract_tables_from_pdf(file_path: str) -> List[Tuple[str, int]]:
+    """Extract tables from a PDF as markdown.
+
+    Uses PyMuPDF's ``page.find_tables()`` (>= 1.23). Each detected table is
+    converted to markdown via ``Table.to_markdown()``. Pages without tables
+    are skipped.
+
+    Returns a list of ``(markdown, page_number)`` tuples (1-indexed).
+    """
+    import fitz  # type: ignore[import-untyped]
+
+    results: List[Tuple[str, int]] = []
+
+    try:
+        with fitz.open(file_path) as doc:
+            for page_index, page in enumerate(doc):
+                if not hasattr(page, "find_tables"):
+                    # PyMuPDF < 1.23 — skip silently rather than crash.
+                    continue
+                try:
+                    tables = page.find_tables()
+                except Exception:
+                    continue
+                # ``find_tables`` returns a TableFinder whose ``tables`` attr
+                # is a list of Table objects. Older versions return a list
+                # directly; handle both.
+                table_iter = getattr(tables, "tables", tables)
+                for tbl in table_iter:
+                    try:
+                        md = tbl.to_markdown()
+                    except Exception:
+                        continue
+                    if not md or not md.strip():
+                        continue
+                    results.append((md.strip(), page_index + 1))
+    except Exception as e:
+        raise ValueError(f"Failed to extract tables from {file_path}: {e}") from e
+
+    return results
+
+
+def load_image_file(file_path: str) -> Tuple[bytes, str]:
+    """Read a directly-uploaded image file as raw bytes.
+
+    Returns ``(image_bytes, mime_type)``. The MIME type is inferred from the
+    file extension; only PNG, JPEG, and WEBP are supported (matching what
+    ``get_file_type`` returns ``'image'`` for).
+    """
+    ext = Path(file_path).suffix.lower()
+    mime = _IMAGE_EXT_TO_MIME.get(ext)
+    if mime is None:
+        raise ValueError(
+            f"Unsupported image extension: {ext}. "
+            f"Supported: {sorted(_IMAGE_EXT_TO_MIME)}"
+        )
+    with open(file_path, "rb") as f:
+        return f.read(), mime
+
+
 async def save_uploaded_file(file_content: bytes, filename: str, upload_dir: str) -> str:
     """Save uploaded file to disk and return path.
     
@@ -127,7 +253,11 @@ async def save_uploaded_file(file_content: bytes, filename: str, upload_dir: str
 
 
 def get_file_type(filename: str) -> str:
-    """Determine file type from filename."""
+    """Determine file type from filename.
+
+    Returns one of: ``'pdf'``, ``'docx'``, ``'txt'``, ``'image'``, or
+    ``'unknown'``.
+    """
     ext = Path(filename).suffix.lower()
     type_map = {
         '.pdf': 'pdf',
@@ -135,6 +265,10 @@ def get_file_type(filename: str) -> str:
         '.doc': 'docx',
         '.txt': 'txt',
         '.md': 'txt',
+        '.png': 'image',
+        '.jpg': 'image',
+        '.jpeg': 'image',
+        '.webp': 'image',
     }
     return type_map.get(ext, 'unknown')
 
@@ -146,4 +280,3 @@ async def cleanup_file(file_path: str):
             os.remove(file_path)
     except Exception:
         pass  # Ignore cleanup errors
-

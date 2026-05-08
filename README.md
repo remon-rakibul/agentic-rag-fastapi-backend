@@ -5,8 +5,11 @@ Production-ready FastAPI backend for LangGraph RAG pipeline with authentication,
 ## Features
 
 - 🔐 JWT-based authentication with refresh tokens
-- 📄 Multi-format document ingestion (PDF, DOCX, URLs, TXT)
-- 🗑️ Document management (list, delete by ID or record)
+- 📄 Multi-format document ingestion (PDF, DOCX, URLs, TXT, **PNG / JPG / WEBP images**)
+- 🖼️ **Multi-modal RAG**: text + tables + images. Tables and images are summarized at ingest, raw originals are passed to GPT-4o-mini at answer time
+- 🔍 **Hybrid retrieval** (PGVector cosine + Postgres full-text search) fused with Reciprocal Rank Fusion
+- 🎯 **Pluggable cross-encoder reranker** (BGE default, Cohere optional)
+- 🗑️ Document management (list, delete by ID or record, cascades into raw image / table assets)
 - 💬 Streaming chat with RAG workflow
 - 📜 Chat history with thread management
 - 🐘 PostgreSQL with pgvector for vector storage
@@ -31,6 +34,106 @@ rag-agent-fastapi-backend/
 ├── alembic/              # Database migrations
 └── tests/                # Test suite
 ```
+
+## Multi-Modal RAG
+
+This backend implements [**Option 3** of the LangChain semi-structured /
+multi-modal RAG cookbook](https://blog.langchain.com/semi-structured-multi-modal-rag/):
+text is embedded as-is, tables and images are summarized by GPT-4o-mini,
+the **summaries** are embedded for retrieval, and the **raw** tables and
+images are stored separately and passed back to GPT-4o-mini at answer
+synthesis time — so the model sees exact numbers in tables and the actual
+pixels of charts, not paraphrases.
+
+### Supported file types
+
+| Type        | Extracted              | Notes                                                      |
+| ----------- | ---------------------- | ---------------------------------------------------------- |
+| **PDF**     | text + tables + images | Tables via `page.find_tables()`; images via `get_images()` |
+| **DOCX**    | text                   |                                                            |
+| **TXT / MD**| text                   |                                                            |
+| **PNG / JPG / JPEG / WEBP** | image      | Captioned by gpt-4o-mini, stored as one image asset        |
+
+### Pipeline overview
+
+**Ingestion**
+
+```
+file ─┬─► text ──────────────────────────► chunk ─► embed ─► PGVector
+      │
+      ├─► tables (markdown)  ─► summarize ─► embed (summary) ─► PGVector
+      │                       └─ raw markdown ──────────────► table_elements
+      │
+      └─► images (bytes)     ─► caption  ──► embed (caption) ─► PGVector
+                              └─ raw bytes ───────────────────► image_assets
+```
+
+**Retrieval**
+
+```
+query
+  ├─► dense  (PGVector cosine, k=20)  ─┐
+  ├─► sparse (Postgres FTS,    k=20)  ─┴► RRF (k=60) ─► top-20
+  └─► reranker (BGE / Cohere) ──────────────────────► top-5
+```
+
+**Answer time** — the retrieved chunks carry `image_asset_id=...` and
+`table_id=...` markers. `generate_answer` parses the markers, fetches the
+raw tables (markdown) and images (base64) from Postgres, and assembles a
+multimodal `HumanMessage` for gpt-4o-mini.
+
+### Example chat queries
+
+```bash
+# Image upload + visual question
+curl -X POST http://localhost:8000/api/v1/digest \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "files=@architecture-diagram.png"
+
+curl -X POST http://localhost:8000/api/v1/chat \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Which services in the diagram talk to the queue?"}'
+
+# PDF with embedded tables
+curl -X POST http://localhost:8000/api/v1/digest \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "files=@quarterly-report.pdf"
+
+curl -X POST http://localhost:8000/api/v1/chat \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What was the Q3 revenue across all regions?"}'
+```
+
+### New environment variables (all have sensible defaults)
+
+```bash
+# Multi-modal LLM (used for image captions, table summaries, multimodal answers)
+MULTIMODAL_MODEL=gpt-4o-mini
+MAX_IMAGES_PER_DOC=50
+MAX_TABLES_PER_DOC=30
+MAX_IMAGES_IN_ANSWER=4
+MAX_TABLES_IN_ANSWER=4
+
+# Hybrid retrieval (dense + Postgres FTS, fused with RRF)
+HYBRID_DENSE_K=20
+HYBRID_SPARSE_K=20
+RRF_K=60
+HYBRID_FINAL_K=20
+
+# Reranker
+RERANKER_PROVIDER=bge          # 'bge' | 'cohere' | 'noop'
+BGE_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+COHERE_RERANK_MODEL=rerank-v4.0-fast
+COHERE_API_KEY=                # required when RERANKER_PROVIDER=cohere
+RERANK_TOP_K=5
+```
+
+> **Deep dive**: see [`MULTIMODAL_RAG_ARCHITECTURE.md`](MULTIMODAL_RAG_ARCHITECTURE.md)
+> for the full data model, ingestion + retrieval diagrams, multi-vector
+> swap details, RRF math, user isolation guarantees, prompt definitions,
+> and operational notes.
 
 ## Setup
 
@@ -146,11 +249,13 @@ curl -X POST http://localhost:8000/api/v1/auth/logout \
 
 ### Ingest Documents
 ```bash
-# Upload files
+# Upload files (PDF text + embedded tables + embedded images,
+# DOCX/TXT text, or direct PNG/JPG/WEBP image uploads)
 curl -X POST http://localhost:8000/api/v1/digest \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -F "files=@document.pdf" \
-  -F "files=@document.docx"
+  -F "files=@document.docx" \
+  -F "files=@diagram.png"
 
 # Ingest URLs (using main endpoint)
 curl -X POST http://localhost:8000/api/v1/digest \

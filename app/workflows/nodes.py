@@ -1,18 +1,44 @@
 """LangGraph workflow node functions extracted from graph.py."""
-from langgraph.graph import MessagesState
-from langchain.chat_models import init_chat_model
-from langchain_classic.tools.retriever import create_retriever_tool
-from langchain_core.tools import BaseTool
-from pydantic import BaseModel, Field
-from typing import Literal, List, Optional
+import base64
+import logging
 import os
+import re
+from typing import Literal, List, Optional, Tuple
+
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import BaseTool
+from langgraph.graph import MessagesState
+from pydantic import BaseModel, Field
+
 from app.core.config import settings
+from app.core.database import SessionLocal
+from app.models.database import ImageAsset, TableElement
 from app.workflows.prompt_loader import (
     get_system_message,
     get_prompt,
     get_retriever_tool_config,
     get_settings
 )
+
+_logger = logging.getLogger(__name__)
+
+# Marker patterns emitted by the multimodal retriever tool. We tolerate
+# whitespace and quoting variations to be robust against LLM-rephrased
+# tool outputs in checkpoint replay.
+_IMAGE_ASSET_RE = re.compile(r"image_asset_id\s*=\s*([\w-]+)")
+_TABLE_ID_RE = re.compile(r"table_id\s*=\s*([\w-]+)")
+
+
+def _unique(items):
+    """Preserve order; drop duplicates."""
+    seen = set()
+    out = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
 
 # Ensure OPENAI_API_KEY is set in environment
 # Some langchain components check os.environ directly
@@ -276,12 +302,19 @@ def create_workflow_nodes(
         return {"messages": [{"role": "user", "content": response.content}]}
     
     def generate_answer(state: MessagesState):
-        """Generate an answer from retrieved context."""
+        """Generate an answer from retrieved context.
+
+        Multi-modal aware: when the most recent tool message contains
+        ``image_asset_id=...`` or ``table_id=...`` markers (emitted by the
+        multimodal retriever tool), we fetch the raw image bytes / table
+        markdown from Postgres and assemble a multimodal HumanMessage with
+        the original images attached as ``image_url`` parts.
+        """
         messages = state["messages"]
-        
+
         # Get the current question (exclude last message which should be the tool response)
         question = _get_latest_user_question(messages, exclude_last=True)
-        
+
         # CRITICAL: Find the actual tool response message (not just assume it's last)
         # Tool responses come after AI messages with tool_calls
         context = ""
@@ -289,7 +322,7 @@ def create_workflow_nodes(
             msg = messages[i]
             msg_type = getattr(msg, 'type', None) or (msg.get('type') if isinstance(msg, dict) else None)
             msg_role = getattr(msg, 'role', None) or (msg.get('role') if isinstance(msg, dict) else None)
-            
+
             # Check if this is a tool message
             if (msg_type == "tool") or (msg_role == "tool"):
                 # This is the tool response - extract content
@@ -298,7 +331,7 @@ def create_workflow_nodes(
                 elif isinstance(msg, dict):
                     context = msg.get('content', '')
                 break
-        
+
         # If no tool response found, try last message as fallback
         if not context and messages:
             last_msg = messages[-1]
@@ -306,17 +339,87 @@ def create_workflow_nodes(
                 context = last_msg.content
             elif isinstance(last_msg, dict):
                 context = last_msg.get('content', '')
-        
+
         # Handle empty context case
         if not context or context.strip() == "":
-            # No context retrieved - provide helpful response
             response_content = "I don't have enough information in the provided documents to answer this question. Please ensure relevant documents have been ingested."
-            from langchain_core.messages import AIMessage
             return {"messages": [AIMessage(content=response_content)]}
-        
-        # Load prompt from prompts.json
-        prompt = get_prompt("generate_answer", question=question, context=context)
-        response = response_model.invoke([{"role": "user", "content": prompt}])
+
+        # Multi-vector swap: parse markers and fetch raw elements.
+        max_images = getattr(settings, "MAX_IMAGES_IN_ANSWER", 4)
+        max_tables = getattr(settings, "MAX_TABLES_IN_ANSWER", 4)
+
+        image_ids = _unique(_IMAGE_ASSET_RE.findall(context))[:max_images]
+        table_ids = _unique(_TABLE_ID_RE.findall(context))[:max_tables]
+
+        raw_tables: List[Tuple[str, str]] = []  # (table_id, raw_markdown)
+        raw_images: List[Tuple[str, str, bytes]] = []  # (image_asset_id, mime, bytes)
+
+        if image_ids or table_ids:
+            db = SessionLocal()
+            try:
+                if table_ids:
+                    rows = (
+                        db.query(TableElement)
+                        .filter(TableElement.id.in_(table_ids))
+                        .all()
+                    )
+                    for row in rows:
+                        raw_tables.append((row.id, row.raw_markdown or ""))
+                if image_ids:
+                    rows = (
+                        db.query(ImageAsset)
+                        .filter(ImageAsset.id.in_(image_ids))
+                        .all()
+                    )
+                    for row in rows:
+                        if row.image_bytes and row.mime_type:
+                            raw_images.append((row.id, row.mime_type, row.image_bytes))
+            except Exception as exc:
+                _logger.warning(
+                    "Failed to fetch raw multimodal elements (falling back to summaries): %s",
+                    exc,
+                )
+                raw_tables = []
+                raw_images = []
+            finally:
+                db.close()
+
+        # Build the augmented text context with raw tables inline.
+        augmented_context = context
+        if raw_tables:
+            table_blocks = []
+            for tid, md in raw_tables:
+                table_blocks.append(f"[Raw table table_id={tid}]\n{md}")
+            augmented_context = (
+                augmented_context
+                + "\n\nThe following raw markdown tables are attached for the table summaries above:\n\n"
+                + "\n\n".join(table_blocks)
+            )
+
+        prompt = get_prompt("generate_answer", question=question, context=augmented_context)
+
+        if raw_images:
+            # Multimodal HumanMessage: text + image_url parts. gpt-4o-mini
+            # accepts the same list-of-content shape as gpt-4o.
+            content: list = [{"type": "text", "text": prompt}]
+            for _aid, mime, img_bytes in raw_images:
+                try:
+                    b64 = base64.b64encode(img_bytes).decode("utf-8")
+                except Exception:
+                    continue
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    }
+                )
+            response = response_model.invoke([HumanMessage(content=content)])
+        else:
+            response = response_model.invoke(
+                [{"role": "user", "content": prompt}]
+            )
+
         return {"messages": [response]}
 
     def route_after_tools(

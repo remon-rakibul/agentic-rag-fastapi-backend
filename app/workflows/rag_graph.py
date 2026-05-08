@@ -1,12 +1,14 @@
 """LangGraph workflow builder."""
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.prebuilt import ToolNode, tools_condition
-from langchain_classic.tools.retriever import create_retriever_tool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 from app.workflows.nodes import create_workflow_nodes
 from app.workflows.prompt_loader import get_retriever_tool_config
 from app.workflows.tools import get_all_tools
+from app.workflows.tools.multimodal_retriever_tool import (
+    create_multimodal_retriever_tool,
+)
 from app.core.config import settings
 from app.utils.db_uri import normalize_db_uri_for_asyncpg
 
@@ -30,8 +32,11 @@ def build_rag_graph(retriever, checkpointer, tool_name: str = None, tool_descrip
     if tool_description is None:
         tool_description = tool_config.get('description', 'Search and return information from ingested documents.')
     
-    # Create retriever tool
-    retriever_tool = create_retriever_tool(
+    # Custom retriever tool that emits image_asset_id / table_id markers in
+    # its tool-message output. The markers are picked up by generate_answer
+    # to fetch the original bytes / markdown from Postgres and build a
+    # multimodal HumanMessage.
+    retriever_tool = create_multimodal_retriever_tool(
         retriever,
         tool_name,
         tool_description,

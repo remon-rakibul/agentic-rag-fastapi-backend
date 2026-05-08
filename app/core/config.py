@@ -44,7 +44,41 @@ class Settings(BaseSettings):
     
     # User Agent
     USER_AGENT: Optional[str] = None
-    
+
+    # ------------------------------------------------------------------ #
+    # Multi-modal RAG (Option 3): text + table + image summaries.
+    # ------------------------------------------------------------------ #
+    # Multimodal LLM used to caption images and summarize tables at ingest
+    # time AND synthesize the final answer with raw images attached.
+    MULTIMODAL_MODEL: str = "gpt-4o-mini"
+    # Caps prevent a single huge PDF from blowing up the summary budget.
+    MAX_IMAGES_PER_DOC: int = 50
+    MAX_TABLES_PER_DOC: int = 30
+    # Caps applied at answer time when assembling the multimodal HumanMessage
+    # (vision tokens are expensive).
+    MAX_IMAGES_IN_ANSWER: int = 4
+    MAX_TABLES_IN_ANSWER: int = 4
+
+    # ------------------------------------------------------------------ #
+    # Hybrid retrieval: dense + Postgres FTS fused with Reciprocal Rank Fusion.
+    # ------------------------------------------------------------------ #
+    HYBRID_DENSE_K: int = 20         # candidates from PGVector cosine
+    HYBRID_SPARSE_K: int = 20        # candidates from Postgres ts_rank_cd
+    RRF_K: int = 60                  # RRF k constant (industry default)
+    HYBRID_FINAL_K: int = 20         # candidates passed to the reranker
+
+    # ------------------------------------------------------------------ #
+    # Reranker (cross-encoder, second stage of retrieval).
+    # ------------------------------------------------------------------ #
+    # 'bge'  → BAAI/bge-reranker-v2-m3 via sentence-transformers (default)
+    # 'cohere' → Cohere Rerank v4-fast (requires COHERE_API_KEY)
+    # 'noop' → disable reranking (debugging only)
+    RERANKER_PROVIDER: str = "bge"
+    BGE_RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    COHERE_RERANK_MODEL: str = "rerank-v4.0-fast"
+    COHERE_API_KEY: Optional[str] = None
+    RERANK_TOP_K: int = 5            # final K returned to the LangGraph tool
+
     class Config:
         # Look for .env file: first in current directory, then in parent (refactored/)
         # config.py is at: refactored/app/core/config.py

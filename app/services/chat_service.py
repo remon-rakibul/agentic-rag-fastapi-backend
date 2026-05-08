@@ -26,16 +26,13 @@ class ChatService:
         Returns:
             Compiled LangGraph workflow with user-isolated retrieval
         """
-        # Get user-scoped retriever with top-k=5 filtering
-        # This will:
-        # 1. Filter documents WHERE user_id = {user_id}
-        # 2. Rank filtered docs by cosine similarity to query
-        # 3. Return top 5 most relevant documents from user's collection
-        retriever = self.vector_store_service.get_retriever(
-            user_id=user_id,
-            search_type="similarity",  # Cosine similarity search
-            search_kwargs={"k": 5}      # Retrieve top 5 most similar docs
-        )
+        # Get the full retrieval pipeline: hybrid (dense + sparse + RRF)
+        # followed by a cross-encoder reranker. The pipeline:
+        # 1. Filters by user_id at both arms (post-filter dense, SQL sparse)
+        # 2. Fuses dense + sparse rankings via RRF (k=60)
+        # 3. Reranks top-N candidates with BGE / Cohere
+        # 4. Returns top-K (settings.RERANK_TOP_K, default 5)
+        retriever = self.vector_store_service.get_retriever(user_id=user_id)
         
         # Build graph with user's retriever AND checkpointer
         graph = build_rag_graph(
